@@ -35,16 +35,32 @@
 
 {{ config(materialized = 'table') }}
 
-with ranked as (
+with cleaned as (
 
     select
         *,
-        {{ normalize_priority('priority_raw') }}             as priority_clean,
+        {{ normalize_priority('priority_raw') }}             as priority_clean
+    from {{ source('bronze', 'bronze_tickets_cdc') }}
+
+),
+
+-- LỌC TRƯỚC, XẾP HẠNG SAU.
+-- Bản ghi CDC nào không quy đổi được priority thì bị loại khỏi tập ứng viên
+-- ngay tại đây, TRƯỚC khi row_number() chạy. Nhờ vậy một bản ghi hỏng không
+-- thể thắng cuộc xếp hạng rồi kéo cả ticket biến mất: ticket đó rơi về trạng
+-- thái hợp lệ gần nhất của chính nó.
+-- (Đảo thứ tự hai bước này làm số ticket tụt 12.480 -> 12.168.)
+valid as (select * from cleaned where priority_clean is not null),
+
+ranked as (
+
+    select
+        *,
         row_number() over (
             partition by ticket_id
             order by event_time desc, cdc_seq desc
         ) as _rn
-    from {{ source('bronze', 'bronze_tickets_cdc') }}
+    from valid
 
 ),
 

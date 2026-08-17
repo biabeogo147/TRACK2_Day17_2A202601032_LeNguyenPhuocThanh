@@ -1,0 +1,19 @@
+services:
+  lab17:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: lab17
+
+    working_dir: /workspace
+
+    volumes:
+      - type: bind
+        source: .
+        target: /workspace
+
+    stdin_open: true
+    tty: true
+
+    command: ["sleep", "infinity"]

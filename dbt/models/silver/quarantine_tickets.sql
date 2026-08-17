@@ -33,6 +33,8 @@ select
     status
 from {{ source('bronze', 'bronze_tickets_cdc') }}
 
--- TODO(nhiệm vụ 3): thay `false` bằng điều kiện "priority không chuẩn hoá
--- được". Khi còn `false`, bảng rỗng và make verify báo 0 / <số kỳ vọng>.
-where false
+-- Dùng CHÍNH macro mà silver_tickets dùng, nên hai model là một tập và phần bù
+-- của nó: bản ghi bị loại khỏi Silver xuất hiện ở đây, không thừa không thiếu.
+-- Viết lại logic ở đây thay vì gọi macro sẽ khiến hai bên trôi dạt khỏi nhau
+-- ngay lần sửa đầu tiên, và bản ghi rơi vào khe hở sẽ biến mất không dấu vết.
+where {{ normalize_priority('priority_raw') }} is null

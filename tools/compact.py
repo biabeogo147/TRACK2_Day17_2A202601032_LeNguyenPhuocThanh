@@ -46,6 +46,7 @@ phải giảm, `files` phải giảm, và `result hash` phải GIỮ NGUYÊN.
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
 
 import duckdb
@@ -57,33 +58,81 @@ SRC = DATA / "gold_events"
 DST = DATA / "gold_events_v2"
 
 
+ROW_GROUP_SIZE = 2048
+
+
 def main() -> int:
     con = duckdb.connect()
 
     n_src = len(list(SRC.glob("*.parquet")))
     print(f"  nguồn : {SRC}  ({n_src:,} file)")
 
-    # TODO(nhiệm vụ 4): hiện thực khung COPY ... TO ... ở phần docstring.
-    #
-    #   con.execute(f"""
-    #       copy (
-    #           select * from read_parquet('{SRC}/*.parquet')
-    #           order by ...
-    #       ) to '{DST}' (
-    #           format parquet,
-    #           partition_by (...),
-    #           overwrite_or_ignore,
-    #           row_group_size ...
-    #       )
-    #   """)
-    #
-    # Sau đó kiểm tra không mất hàng nào:
-    #
-    #   assert <số row dataset cũ> == <số row dataset mới>
+    src_glob = (SRC / "*.parquet").as_posix()
+    dst_path = DST.as_posix()
+    dst_glob = (DST / "**" / "*.parquet").as_posix()
 
-    print("\n  tools/compact.py chưa được hiện thực — đây là nhiệm vụ 4.")
-    print("  Mở file này, đọc phần KHUNG THỰC HIỆN ở đầu file và điền vào TODO.")
-    print("  Hướng dẫn từng bước: GUIDE.md mục 4.\n")
+    n_rows_src = con.execute(
+        f"select count(*) from read_parquet('{src_glob}')"
+    ).fetchone()[0]
+
+    # Dọn đích trước khi ghi: OVERWRITE_OR_IGNORE chỉ ghi đè file TRÙNG TÊN,
+    # nên nếu lần chạy trước dùng cột partition khác thì thư mục cũ còn nguyên
+    # và dataset mới bị trộn với dataset cũ. Xoá trước cho chính công cụ này
+    # cũng idempotent — đúng tinh thần nhiệm vụ 1.
+    if DST.exists():
+        shutil.rmtree(DST)
+
+    # partition_by (event_date)
+    #     Engine chỉ loại được file mà nó biết là vô ích TRƯỚC khi mở file, và
+    #     thông tin duy nhất nó có trước đó là ĐƯỜNG DẪN. event_date có 14 giá
+    #     trị -> 14 thư mục, truy vấn một ngày loại ngay 13/14.
+    #     Không chọn customer_name: 650 giá trị -> 650 thư mục, trung bình ~200
+    #     hàng/file, tức tái tạo lại chính small-file problem đang phải chữa;
+    #     lại còn lệch nặng (ACME 49.000 hàng, khách khác ~126).
+    #
+    # order by event_date, customer_name, event_time
+    #     Ý đồ: gom hàng cùng khách nằm liền nhau để min/max của row group đủ
+    #     hẹp mà lọc được. ĐÃ ĐO VÀ KHÔNG XÁC NHẬN ĐƯỢC: predicate
+    #     customer_name prune 0 row group trên DuckDB 1.5.5 (rows scanned giữ
+    #     nguyên 9.324 dù bỏ hẳn điều kiện customer_name). Giữ lại vì thứ tự
+    #     ổn định giúp nén tốt hơn, nhưng KHÔNG phải nguồn của mức giảm 536×.
+    #
+    # row_group_size 2048
+    #     130.683 hàng / 14 ngày ~ 9.334 hàng/ngày, nên mặc định 122.880 gói
+    #     trọn một ngày vào MỘT row group. ĐÃ ĐO: 122.880 / 4.096 / 2.048 đều
+    #     cho cùng rows scanned = 9.324, tức metric này đếm theo FILE được mở
+    #     chứ không phản ánh row-group pruning. Đánh đổi: 2048 làm phần
+    #     làm-tròn-lên của full scan tệ hơn (136.500 đơn vị cho 130.683 hàng
+    #     thật). Giữ 2048 vì đúng nguyên tắc, nhưng không nhận công cho 536×.
+    #
+    # => Toàn bộ mức giảm đến từ partition_by. Hai quyết định còn lại là lựa
+    #    chọn theo nguyên tắc, chưa được số liệu trong bài này ủng hộ.
+    con.execute(f"""
+        copy (
+            select *
+            from   read_parquet('{src_glob}')
+            order  by event_date, customer_name, event_time
+        ) to '{dst_path}' (
+            format          parquet,
+            partition_by    (event_date),
+            overwrite_or_ignore,
+            row_group_size  {ROW_GROUP_SIZE}
+        )
+    """)
+
+    # Đọc lại qua hive_partitioning: kiểm tra luôn rằng cột partition (đã bị
+    # gỡ khỏi file, chỉ còn trong tên thư mục) khôi phục được đầy đủ.
+    n_rows_dst = con.execute(
+        f"select count(*) from read_parquet('{dst_glob}', hive_partitioning = true)"
+    ).fetchone()[0]
+    assert n_rows_src == n_rows_dst, f"mất hàng khi nén: {n_rows_src:,} -> {n_rows_dst:,}"
+
+    n_dst = len(list(DST.glob("**/*.parquet")))
+    print(f"  đích  : {DST}  ({n_dst:,} file)")
+    print(f"\n  {n_src:,} file -> {n_dst:,} file · {n_rows_dst:,} hàng không đổi ✓")
+    print("  Bước tiếp: `make explain` để đo lại.\n")
+
+    con.close()
     return 0
 
 

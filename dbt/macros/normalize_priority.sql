@@ -45,16 +45,20 @@
 #}
 
 {% macro normalize_priority(col) %}
-    -- TODO(nhiệm vụ 3): thay biểu thức dưới đây bằng một khối CASE xử lý
-    -- đủ ba nhóm ở trên.
-    --
-    --     case
-    --         when <nhóm 1: đã là số hợp lệ>  then <giữ nguyên>
-    --         when <nhóm 2: nhãn chữ>         then <số tương ứng>
-    --         ...
-    --         else null                        -- nhóm 3
-    --     end
-    try_cast({{ col }} as integer)
+    -- Nhánh 1 xử lý CÙNG LÚC hai lỗi ngược chiều của try_cast cũ: nó vừa giữ
+    -- lại 1..4, vừa chặn 0/5/-1 (là số hợp lệ về KIỂU nhưng ngoài MIỀN).
+    -- Nhánh 2..5 hấp thụ schema evolution theo tài liệu API của team backend.
+    -- lower(trim(...)) là phòng vệ: dữ liệu hiện sạch, nhưng nguồn đã đổi
+    -- format một lần thì có thể đổi nữa.
+    case
+        when try_cast({{ col }} as integer) between 1 and 4
+            then try_cast({{ col }} as integer)
+        when lower(trim({{ col }})) = 'urgent' then 1
+        when lower(trim({{ col }})) = 'high'   then 2
+        when lower(trim({{ col }})) = 'medium' then 3
+        when lower(trim({{ col }})) = 'low'    then 4
+        else null
+    end
 {% endmacro %}
 
 
@@ -64,6 +68,16 @@
     hơn (rỗng / NULL / là số nhưng ngoài khoảng / là chuỗi lạ).
 #}
 {% macro priority_reject_reason(col) %}
-    -- TODO(nhiệm vụ 3, không bắt buộc): phân biệt các loại lỗi khác nhau.
-    'priority không quy đổi được về 1..4'
+    -- Bốn loại lỗi cần hành động khác nhau từ người trực:
+    --   thiếu dữ liệu  -> hỏi producer vì sao trường bị bỏ trống
+    --   ngoài miền     -> nhiều khả năng lỗi logic phía nguồn, còn cứu được
+    --   chuỗi lạ       -> có thể là schema evolution CHƯA được tài liệu hoá;
+    --                     xác minh với backend rồi bổ sung nhánh vào macro trên
+    case
+        when {{ col }} is null                       then 'priority thiếu (NULL)'
+        when trim({{ col }}) = ''                    then 'priority rỗng (chuỗi trắng)'
+        when try_cast({{ col }} as integer) is not null
+            then 'priority là số nhưng ngoài miền 1..4: ' || {{ col }}
+        else 'priority là nhãn lạ, không có trong tài liệu API: ' || {{ col }}
+    end
 {% endmacro %}
